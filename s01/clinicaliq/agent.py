@@ -10,9 +10,16 @@ Run the agent from the session folder:
 Session 1 graph:
     START --> respond --> END
 """
-from langgraph.graph import END, StateGraph
 
-from .nodes import respond
+import sqlite3
+from unittest import result
+from uuid import uuid4
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.graph import START, END, StateGraph
+from .config import CHECKPOINT_DB
+
+from .nodes import respond,classify,escalate,decline,route_query
 from .state import ClinicalIQState
 
 
@@ -38,14 +45,26 @@ from .state import ClinicalIQState
 #
 # ---------------------------------------------------------------------------
 
-def build_graph():
-    """Build and compile the ClinicalIQ LangGraph graph."""
-    raise NotImplementedError("TODO 5: implement build_graph() in clinicaliq/agent.py")
+def build_graph(checkpointer=None):
+    builder = StateGraph(ClinicalIQState)
+    builder.add_node("respond", respond)
+    builder.add_node("classify", classify)
+    builder.add_node("escalate", escalate)
+    builder.add_node("decline", decline)
+
+    builder.add_edge(START, "classify")
+    builder.add_conditional_edges("classify", route_query, {
+        "respond": "respond",
+        "escalate": "escalate",
+        "decline": "decline"
+    })
+    builder.add_edge("respond", END)
+    builder.add_edge("escalate", END)
+    builder.add_edge("decline", END)
+
+    return builder.compile(checkpointer=checkpointer)
 
 
-# Module-level graph instance required by langgraph.json for LangGraph Studio.
-# run() uses this directly rather than building a second copy.
-graph = build_graph()
 
 
 # ---------------------------------------------------------------------------
@@ -53,6 +72,10 @@ graph = build_graph()
 # ---------------------------------------------------------------------------
 
 def run() -> None:
+    conn = sqlite3.connect(str(CHECKPOINT_DB), check_same_thread=False)
+    _graph  = build_graph(checkpointer=SqliteSaver(conn)) # terminal app opts into disk persistence explicit
+    thread_id = str(uuid4())
+    config   = {"configurable": {"thread_id": thread_id}}
     print("=" * 55)
     print("  ClinicalIQ | Apollo Health Clinic")
     print("  Type 'quit' to exit")
@@ -71,7 +94,9 @@ def run() -> None:
             print("\nClinicalIQ: Thank you for choosing Apollo Health Clinic. Goodbye!")
             break
 
-        result = graph.invoke({"customer_message": user_input, "response": ""})
+        result = _graph.invoke({"customer_message": user_input, "response": ""}, config=config)
+        route = result.get("query_type", "?")
+        print(f"\n[Routed: {route}]")
         print(f"\nClinicalIQ: {result['response']}")
 
 
